@@ -316,11 +316,12 @@ def main():
         # --- Weekly delta from total count ---
         prev = (state.get(pid) or {}).get("userRatingCount")
         if isinstance(prev, (int, float)):
-            weekly_new = count - int(prev)
-            weekly_new_clamped = weekly_new if weekly_new >= 0 else 0
+            weekly_new = max(0, count - int(prev))
         else:
-            weekly_new = None
-            weekly_new_clamped = None  # first run: no baseline
+            # First baseline: approximate “new this week” by actual 7-day reviews
+            weekly_new = len(newest_week)
+        weekly_new_clamped = weekly_new
+
 
 
         # Record the latest count for next week
