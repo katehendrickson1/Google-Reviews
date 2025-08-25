@@ -49,9 +49,13 @@ jobs:
           if [ -f state_reviews.json ]; then
             git config user.name "github-actions[bot]"
             git config user.email "github-actions[bot]@users.noreply.github.com"
-            git add state_reviews.json
-            git commit -m "Update state_reviews.json [skip ci]" || echo "No changes to commit"
-            git push
+            git add -f state_reviews.json   # <- force add even if ignored
+            if git diff --cached --quiet; then
+              echo "No changes to commit"
+            else
+              git commit -m "Update state_reviews.json [skip ci]"
+              git push
+            fi
           else
             echo "state_reviews.json not found (nothing to persist)."
           fi
