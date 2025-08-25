@@ -122,14 +122,32 @@ def upload_to_google_sheets(csv_path, worksheet_name="Google Reviews Data"):
     except gspread.WorksheetNotFound:
         ws = sh.add_worksheet(title=worksheet_name, rows=2000, cols=20)
 
-    # Read the CSV and push to sheet
+    # Read the CSV
     import csv
     with open(csv_path, "r", encoding="utf-8") as f:
         rows = list(csv.reader(f))
-    
-    ws.clear()
-    ws.update(rows, "A1")
-    print(f"✅ Uploaded {csv_path} to Google Sheet (ID {SHEET_ID}) on tab '{worksheet_name}'")
+    if not rows:
+        print("⚠️ No rows found in CSV to upload.")
+        return
+
+    header = rows[0]
+    data = rows[1:]
+
+    # Get existing values from the sheet
+    existing = ws.get_all_values()
+
+    if not existing:
+        # Sheet is empty → write header + all data
+        ws.update([header] + data, "A1")
+        print(f"✅ Created new sheet with {len(data)} rows on tab '{worksheet_name}'")
+    else:
+        # Assume header is already there → just append the new data rows
+        if data:
+            ws.append_rows(data, value_input_option="RAW")
+            print(f"✅ Appended {len(data)} rows to tab '{worksheet_name}'")
+        else:
+            print("⚠️ No new data rows to append.")
+
 
 
 
