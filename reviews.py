@@ -338,7 +338,8 @@ def main():
         else:
             # First baseline: approximate “new this week” by actual 7-day reviews
             weekly_new = len(newest_week)
-            weekly_new_clamped = weekly_new
+        
+        weekly_new_clamped = max(0, weekly_new)
 
 
 
