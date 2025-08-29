@@ -363,10 +363,7 @@ def main():
         print("\n===============================")
         print(f"📍 {loc_name}")
         print(f"⭐ Avg rating: {avg_rating} ({count} reviews)")
-        if weekly_new_clamped is None:
-            print("🆕 New this week: — (first run baseline)")
-        else:
-            print(f"🆕 New this week: {weekly_new_clamped}")
+        print(f"🆕 New this week: {weekly_new_clamped}")
         print(f"🙂 Sentiment: {sentiment['label']} ({sentiment['score']})")
         if newest_week:
             print("Newest reviews:")
