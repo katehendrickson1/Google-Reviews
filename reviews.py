@@ -1,4 +1,4 @@
-import os, sys, csv, re, math, json, pathlib, datetime, requests, gspread
+import os, sys, csv, re, math, json, pathlib, datetime, requests, gspread,  hashlib
 from collections import Counter
 from dotenv import load_dotenv
 from google.oauth2.service_account import Credentials
@@ -36,6 +36,30 @@ LOCATIONS = [
     {"place_id": "ChIJMzZkas_9x4kRFjoJslJnhYk", "name": "Middle River"}
     # Add more: {"place_id": "...", "name": "..."},
 ]
+
+SERVICE_ACCOUNT_PATH = os.getenv("GOOGLE_SERVICE_ACCOUNT", "service_account.json")
+
+from functools import lru_cache
+import json, base64
+
+@lru_cache(maxsize=1)
+def get_gspread_client():
+    scope = ["https://www.googleapis.com/auth/spreadsheets"]
+
+    # Prefer base64 secret if present (handy for GitHub Actions)
+    b64 = os.getenv("SERVICE_ACCOUNT_JSON_B64")
+    if b64:
+        info = json.loads(base64.b64decode(b64).decode("utf-8"))
+        creds = Credentials.from_service_account_info(info, scopes=scope)
+    else:
+        if not os.path.exists(SERVICE_ACCOUNT_PATH):
+            raise FileNotFoundError(
+                f"Service account file not found at: {SERVICE_ACCOUNT_PATH}"
+            )
+        creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_PATH, scopes=scope)
+
+    return gspread.authorize(creds)
+
 
 # How many newest reviews to show in Slack & reports
 N_NEWEST = 5
@@ -111,8 +135,7 @@ def upload_to_google_sheets(csv_path, worksheet_name="Google Reviews Data"):
     scope = ["https://www.googleapis.com/auth/spreadsheets"]
 
     # Load service account credentials
-    creds = Credentials.from_service_account_file("service_account.json", scopes=scope)
-    client = gspread.authorize(creds)
+    client = get_gspread_client()
 
     # Open the target sheet
     sh = client.open_by_key(SHEET_ID)
@@ -147,6 +170,69 @@ def upload_to_google_sheets(csv_path, worksheet_name="Google Reviews Data"):
             print(f"✅ Appended {len(data)} rows to tab '{worksheet_name}'")
         else:
             print("⚠️ No new data rows to append.")
+
+
+def upsert_reviews_to_sheet(reviews_rows, worksheet_name="Reviews (raw)"):
+    """
+    reviews_rows: list of dicts with keys:
+        date_run, place, place_id, author, rating, publishTime, relativeTime, text
+    De-dupes by a composite key of (place_id, publishTime, text_hash).
+    """
+    scope = ["https://www.googleapis.com/auth/spreadsheets"]
+    client = get_gspread_client()
+
+    sh = client.open_by_key(SHEET_ID)
+
+    # Ensure worksheet exists with header
+    header = [
+        "date_run","place","place_id","author","rating",
+        "publishTime","relativeTime","text","dedupe_key"
+    ]
+    try:
+        ws = sh.worksheet(worksheet_name)
+        existing = ws.get_all_values()
+        if not existing:
+            ws.update([header], "A1")
+            existing = [header]
+    except gspread.WorksheetNotFound:
+        ws = sh.add_worksheet(title=worksheet_name, rows=2000, cols=10)
+        ws.update([header], "A1")
+        existing = [header]
+
+    # Build set of existing keys to avoid duplicates
+    existing_keys = set()
+    if len(existing) > 1:
+        dedupe_idx = existing[0].index("dedupe_key")
+        for row in existing[1:]:
+            if len(row) > dedupe_idx:
+                existing_keys.add(row[dedupe_idx])
+
+    # Prepare new rows
+    to_append = []
+    for r in reviews_rows:
+        # publishTime can be None; include rating & a short hash of text to reduce accidental dupes
+        text = (r.get("text") or "").strip()
+        text_hash = hashlib.sha1(text.encode("utf-8")).hexdigest()[:12]
+        key = f"{r.get('place_id')}\t{r.get('publishTime')}\t{text_hash}"
+        if key in existing_keys:
+            continue
+        to_append.append([
+            r.get("date_run",""),
+            r.get("place",""),
+            r.get("place_id",""),
+            r.get("author",""),
+            r.get("rating",""),
+            r.get("publishTime",""),
+            r.get("relativeTime",""),
+            text,
+            key
+        ])
+
+    if to_append:
+        ws.append_rows(to_append, value_input_option="RAW")
+        print(f"✅ Appended {len(to_append)} review row(s) to '{worksheet_name}'")
+    else:
+        print(f"ℹ️ No new review rows to append (all were duplicates).")
 
 
 
@@ -295,6 +381,8 @@ def main():
     ensure_dir(out_dir)
 
     summary_rows = []
+    reviews_rows_all = []
+
     for loc in LOCATIONS:
         pid = loc["place_id"]
         name = loc.get("name") or pid
@@ -330,6 +418,19 @@ def main():
         seven_days_ago = now_utc - datetime.timedelta(days=7)
         newest_week = reviews_since(normalized_newest, seven_days_ago)
         sample_7d = len(newest_week)  # keep this metric if you like
+
+        # ✅ INSERT THE DETAIL ROW BUILDER *RIGHT HERE*
+        for r in newest_week:  # last 7 days only
+            reviews_rows_all.append({
+                "date_run": today,
+                "place": name,
+                "place_id": pid,
+                "author": r.get("author") or "",
+                "rating": r.get("rating"),
+                "publishTime": r.get("publishTime") or "",
+                "relativeTime": r.get("relativeTime") or "",
+                "text": (r.get("text") or "").strip()
+            })
 
         # --- Weekly delta from total count ---
         prev = (state.get(pid) or {}).get("userRatingCount")
@@ -428,6 +529,9 @@ def main():
 
     # Upload to Google Sheets
         upload_to_google_sheets(csv_path, worksheet_name="Google Reviews Data")
+    # Write detailed reviews to a separate worksheet
+        upsert_reviews_to_sheet(reviews_rows_all, worksheet_name="Reviews (raw)")
+
 
 if __name__ == "__main__":
     main()
