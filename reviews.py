@@ -432,15 +432,10 @@ def main():
                 "text": (r.get("text") or "").strip()
             })
 
-        # --- Weekly delta from total count ---
-        prev = (state.get(pid) or {}).get("userRatingCount")
-        if isinstance(prev, (int, float)):
-            weekly_new = max(0, count - int(prev))
-        else:
-            # First baseline: approximate “new this week” by actual 7-day reviews
-            weekly_new = len(newest_week)
-        
-        weekly_new_clamped = max(0, weekly_new)
+        # --- Weekly "new reviews" count based on 7-day window ---
+        weekly_new = len(newest_week)
+        weekly_new_clamped = weekly_new
+
 
 
 
