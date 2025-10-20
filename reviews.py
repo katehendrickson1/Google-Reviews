@@ -498,7 +498,7 @@ def main():
             "review_count": count,
             "new_reviews_week": weekly_new_clamped if weekly_new_clamped is not None else "",
             "sentiment_label": sentiment["label"],
-            "sentiment_score": sentiment["score"],
+            "sentiment_score": round(float(sentiment["score"]), 2),
             "report_path": md_path.replace("\\", "/"),
             "maps_url": maps_url or ""
         })
