@@ -270,31 +270,46 @@ def fetch_legacy_newest(place_id, language="en"):
 def summarize_sentiment(avg_rating, reviews_text_and_star):
     # star-based sentiment from review stars OR fallback to avg rating
     star_scores = []
+    stars_list = []
     pos_hits = neg_hits = 0
     tokens_all = []
 
     for stars, text in reviews_text_and_star:
         if isinstance(stars, (int, float)):
+            stars_list.append(float(stars))
             star_scores.append(stars_to_sentiment(stars))
         t = tokenize(text or "")
         tokens_all.extend(t)
         pos_hits += sum(1 for w in t if w in POS_WORDS)
         neg_hits += sum(1 for w in t if w in NEG_WORDS)
 
-    if star_scores:
-        star_sent = sum(star_scores) / len(star_scores)
+    # --- RULE 1: if all new reviews are 5★, make score = 1.0
+    if stars_list and all(abs(s - 5.0) < 1e-9 for s in stars_list):
+        overall = 1.0
+        label = "Positive"
     else:
-        star_sent = stars_to_sentiment(avg_rating) if avg_rating else 0.0
+        # stars component
+        if star_scores:
+            star_sent = sum(star_scores) / len(star_scores)
+        else:
+            star_sent = stars_to_sentiment(avg_rating) if avg_rating else 0.0
 
-    text_sent = 0.0
-    if pos_hits or neg_hits:
-        text_sent = (pos_hits - neg_hits) / max(1, (pos_hits + neg_hits))
-        text_sent = max(-1.0, min(1.0, text_sent))
+        # text component
+        text_sent = 0.0
+        total_hits = pos_hits + neg_hits
+        if total_hits:
+            text_sent = (pos_hits - neg_hits) / total_hits
+            text_sent = max(-1.0, min(1.0, text_sent))
 
-    overall = 0.7 * star_sent + 0.3 * text_sent
-    label = label_from_score(overall)
+        # --- RULE 2: if no text signal, don't weight it
+        w_text = 0.3 if total_hits > 0 else 0.0
+        w_star = 1.0 - w_text
 
-    # themes
+        overall = w_star * star_sent + w_text * text_sent
+        overall = max(-1.0, min(1.0, overall))
+        label = label_from_score(overall)
+
+    # themes (unchanged)
     stop = set("""
 a an the and or of to in for on at with from by is are was were be been it this that those these very really just quite not
 we i you they he she them us our my your their
@@ -304,7 +319,10 @@ we i you they he she them us our my your their
     likes = [w for w, _ in common if w in POS_WORDS][:6]
     cons  = [w for w, _ in common if w in NEG_WORDS][:6]
 
-    return {"score": round(overall, 3), "label": label, "likes": likes, "cons": cons}
+    return {"score": round(min(1.0, max(-1.0, overall)), 3),
+            "label": label,
+            "likes": likes, "cons": cons}
+
 
 # ---------- Report generation ----------
 def ensure_dir(path):
