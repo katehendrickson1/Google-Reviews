@@ -456,16 +456,38 @@ def main():
             "lastRun": datetime.date.today().isoformat(),
         }
         # --- Sentiment ---
-        # --- Sentiment (same as you have) ---
-        pairs = []
-        for r in normalized_newest[:5]:
-            pairs.append((r.get("rating"), r.get("text")))
+
+        # --- Sentiment (use the same 7-day set you display) ---
+        # --- Sentiment (use the same 7-day set you display) ---
+        def _to_float_or_none(x):
+            try:
+                if x is None or x == "":
+                    return None
+                return float(x)
+            except Exception:
+                return None
+
+        # Prefer the 7-day filtered reviews you already show in Slack/markdown
+        pairs = [(_to_float_or_none(r.get("rating")), (r.get("text") or "")) for r in newest_week[:5]]
+
+        # Fallback to overall newest if week is empty
         if not pairs:
-            for r in new_reviews[:5]:
-                stars = r.get("rating")
-                txt = (r.get("originalText") or {}).get("text") or r.get("text")
+            pairs = [(_to_float_or_none(r.get("rating")), (r.get("text") or "")) for r in normalized_newest[:5]]
+
+        # Final fallback: new API reviews structure
+        if not pairs:
+            for r in (new.get("reviews") or [])[:5]:
+                stars = _to_float_or_none(r.get("rating"))
+                txt = ((r.get("originalText") or {}).get("text") or r.get("text") or "")
                 pairs.append((stars, txt))
-        sentiment = summarize_sentiment(avg_rating, pairs)
+
+        # If every available review in the set is exactly 5.0, force 1.0
+        only_star_vals = [p[0] for p in pairs if p[0] is not None]
+        if only_star_vals and all(abs(s - 5.0) < 1e-9 for s in only_star_vals):
+            sentiment = {"score": 1.0, "label": "Positive", "likes": [], "cons": []}
+        else:
+            sentiment = summarize_sentiment(avg_rating, pairs)
+
 
         # --- Terminal output per location ---
         print("\n===============================")
@@ -517,14 +539,6 @@ def main():
     save_state(state)
 
     # Write CSV summary
-    if summary_rows:
-        csv_path = os.path.join(out_dir, "summary.csv")
-        with open(csv_path, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=list(summary_rows[0].keys()))
-            writer.writeheader()
-            writer.writerows(summary_rows)
-        print(f"\n✅ Saved CSV + Markdown reports in: {out_dir}")
-    
     if summary_rows:
         csv_path = os.path.join(out_dir, "summary.csv")
         with open(csv_path, "w", newline="", encoding="utf-8") as f:
