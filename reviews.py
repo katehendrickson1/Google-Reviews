@@ -131,22 +131,19 @@ def reviews_since(reviews, since_dt_utc):
 
 #--- google sheets upload helper ---#
 def upload_to_google_sheets(csv_path, worksheet_name="Google Reviews Data"):
-    # Define the scope
-    scope = ["https://www.googleapis.com/auth/spreadsheets"]
-
-    # Load service account credentials
+    # Always create a new authorized client
     client = get_gspread_client()
 
-    # Open the target sheet
+    # Open the right Google Sheet by ID
     sh = client.open_by_key(SHEET_ID)
 
+    # Get (or create) the worksheet
     try:
         ws = sh.worksheet(worksheet_name)
     except gspread.WorksheetNotFound:
         ws = sh.add_worksheet(title=worksheet_name, rows=2000, cols=20)
 
-    # Read the CSV
-    import csv
+    # Read the CSV file
     with open(csv_path, "r", encoding="utf-8") as f:
         rows = list(csv.reader(f))
     if not rows:
@@ -156,38 +153,32 @@ def upload_to_google_sheets(csv_path, worksheet_name="Google Reviews Data"):
     header = rows[0]
     data = rows[1:]
 
-    # Get existing values from the sheet
+    # Check if worksheet is empty
     existing = ws.get_all_values()
-
     if not existing:
-        # Sheet is empty → write header + all data
         ws.update([header] + data, "A1")
         print(f"✅ Created new sheet with {len(data)} rows on tab '{worksheet_name}'")
     else:
-        # Assume header is already there → just append the new data rows
         if data:
-            ws.append_rows(data, value_input_option="RAW")
+            ws.append_rows(data, value_input_option="USER_ENTERED")
             print(f"✅ Appended {len(data)} rows to tab '{worksheet_name}'")
         else:
             print("⚠️ No new data rows to append.")
 
+    # Format the first column as date (if your first column is 'date')
+    ws.format('A2:A', {'numberFormat': {'type': 'DATE', 'pattern': 'yyyy-mm-dd'}})
+
 
 def upsert_reviews_to_sheet(reviews_rows, worksheet_name="Reviews (raw)"):
-    """
-    reviews_rows: list of dicts with keys:
-        date_run, place, place_id, author, rating, publishTime, relativeTime, text
-    De-dupes by a composite key of (place_id, publishTime, text_hash).
-    """
-    scope = ["https://www.googleapis.com/auth/spreadsheets"]
+    # Always create a new authorized client
     client = get_gspread_client()
-
     sh = client.open_by_key(SHEET_ID)
 
-    # Ensure worksheet exists with header
     header = [
         "date_run","place","place_id","author","rating",
         "publishTime","relativeTime","text","dedupe_key"
     ]
+
     try:
         ws = sh.worksheet(worksheet_name)
         existing = ws.get_all_values()
@@ -199,7 +190,10 @@ def upsert_reviews_to_sheet(reviews_rows, worksheet_name="Reviews (raw)"):
         ws.update([header], "A1")
         existing = [header]
 
-    # Build set of existing keys to avoid duplicates
+    # Format the date_run column as date
+    ws.format('A2:A', {'numberFormat': {'type': 'DATE', 'pattern': 'yyyy-mm-dd'}})
+
+    # Build set of existing dedupe keys
     existing_keys = set()
     if len(existing) > 1:
         dedupe_idx = existing[0].index("dedupe_key")
@@ -210,7 +204,6 @@ def upsert_reviews_to_sheet(reviews_rows, worksheet_name="Reviews (raw)"):
     # Prepare new rows
     to_append = []
     for r in reviews_rows:
-        # publishTime can be None; include rating & a short hash of text to reduce accidental dupes
         text = (r.get("text") or "").strip()
         text_hash = hashlib.sha1(text.encode("utf-8")).hexdigest()[:12]
         key = f"{r.get('place_id')}\t{r.get('publishTime')}\t{text_hash}"
@@ -229,7 +222,7 @@ def upsert_reviews_to_sheet(reviews_rows, worksheet_name="Reviews (raw)"):
         ])
 
     if to_append:
-        ws.append_rows(to_append, value_input_option="RAW")
+        ws.append_rows(to_append, value_input_option="USER_ENTERED")
         print(f"✅ Appended {len(to_append)} review row(s) to '{worksheet_name}'")
     else:
         print(f"ℹ️ No new review rows to append (all were duplicates).")
