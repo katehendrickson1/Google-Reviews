@@ -444,7 +444,18 @@ def main():
             })
 
         # --- Weekly "new reviews" count based on 7-day window ---
-        weekly_new = len(newest_week)
+        # --- Weekly "new reviews" count based on review count delta ---
+        prev = state.get(pid, {})
+        prev_count = prev.get("userRatingCount")
+
+        if prev_count is not None and count is not None:
+            # True number of new reviews since last run
+            weekly_new = max(0, count - prev_count)
+        else:
+            # First run or missing data → fallback to 7-day filtered
+            weekly_new = len(newest_week)
+
+        # Keep original variable so your existing print/Slack/CSV code works
         weekly_new_clamped = weekly_new
 
 
