@@ -1,0 +1,35 @@
+name: Monthly Sentiment Analysis
+
+on:
+  schedule:
+    # 1st of every month at 15:00 UTC (9:00 AM Denver during MDT / 8:00 AM during MST)
+    - cron: "0 15 1 * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r sentiment-analysis/requirements.txt
+
+      - name: Write service account file
+        run: |
+          echo '${{ secrets.SERVICE_ACCOUNT_JSON }}' > service_account.json
+          echo "GOOGLE_APPLICATION_CREDENTIALS=$PWD/service_account.json" >> $GITHUB_ENV
+
+      - name: Run monthly sentiment analysis
+        working-directory: sentiment-analysis
+        run: python main.py --mode monthly
