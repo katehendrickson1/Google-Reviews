@@ -1,7 +1,9 @@
 import json
 import logging
+import time
 
 from google import genai
+from google.genai import errors as genai_errors
 from google.genai import types
 
 from auth import vertex_credentials
@@ -169,10 +171,26 @@ def _call_llm_raw(client: genai.Client, reviews: list[Review]) -> dict:
         raise
 
 
+def _call_llm_with_429_retry(client: genai.Client, reviews: list[Review]) -> dict:
+    """Call _call_llm_raw with exponential backoff on 429 RESOURCE_EXHAUSTED."""
+    delays = [60, 120, 180]
+    for attempt, delay in enumerate(delays + [None]):
+        try:
+            return _call_llm_raw(client, reviews)
+        except genai_errors.ClientError as e:
+            if e.status_code != 429 or delay is None:
+                raise
+            logger.warning(
+                "429 RESOURCE_EXHAUSTED — waiting %ds before retry %d/%d",
+                delay, attempt + 1, len(delays),
+            )
+            time.sleep(delay)
+
+
 def _analyze_with_retry(client: genai.Client, reviews: list[Review]) -> dict:
     """Call LLM with automatic batch-splitting retry on JSON truncation."""
     try:
-        parsed = _call_llm_raw(client, reviews)
+        parsed = _call_llm_with_429_retry(client, reviews)
     except json.JSONDecodeError:
         if len(reviews) <= 10:
             raise  # can't split further
@@ -184,7 +202,6 @@ def _analyze_with_retry(client: genai.Client, reviews: list[Review]) -> dict:
         a = _analyze_with_retry(client, reviews[:mid])
         b = _analyze_with_retry(client, reviews[mid:])
         all_revs = a.get("reviews", []) + b.get("reviews", [])
-        # Re-normalize staff names across both halves so cross-half variants get merged
         _normalize_staff_names(all_revs)
         summary = b.get("summary", {})
         summary["staff_to_recognize"] = _rebuild_staff_recognition(all_revs)
