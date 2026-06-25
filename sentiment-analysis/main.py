@@ -335,7 +335,7 @@ def run(mode: str, dry_run: bool = False) -> None:
     logger.info("Mode: %s | Period: %s → %s", mode, period_start, period_end)
 
     # --- Read & deduplicate ---
-    raw = read_reviews(since=period_start)
+    raw = read_reviews(since=period_start, until=period_end)
     reviews, dup_count = dedup_reviews(raw)
     logger.info("After dedup: %d reviews (%d duplicates removed)", len(reviews), dup_count)
 

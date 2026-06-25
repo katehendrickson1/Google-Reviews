@@ -42,8 +42,8 @@ def _open_or_create(sheet: gspread.Spreadsheet, name: str, rows: int = 1000, col
 # READ
 # ---------------------------------------------------------------------------
 
-def read_reviews(since: date | None = None) -> list[Review]:
-    """Read all reviews from the raw tab, optionally filtered to publishTime >= since."""
+def read_reviews(since: date | None = None, until: date | None = None) -> list[Review]:
+    """Read all reviews from the raw tab, optionally filtered to since <= publishTime <= until."""
     gc = _client()
     ws = gc.open_by_key(SHEET_ID).worksheet(RAW_REVIEWS_TAB)
     rows = ws.get_all_records()
@@ -52,9 +52,12 @@ def read_reviews(since: date | None = None) -> list[Review]:
     for row in rows:
         publish_time = str(row.get("publishTime") or "").strip()
 
-        if since and publish_time:
+        if publish_time:
             try:
-                if date.fromisoformat(publish_time[:10]) < since:
+                review_date = date.fromisoformat(publish_time[:10])
+                if since and review_date < since:
+                    continue
+                if until and review_date > until:
                     continue
             except ValueError:
                 pass  # malformed date — include the row
