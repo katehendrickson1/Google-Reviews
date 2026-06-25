@@ -1071,7 +1071,9 @@ def write_dashboard(
     # Unmerge ALL cells first — ws.clear() only clears values, not merges.
     # Leftover merges from prior runs shift when row counts change and silently
     # hide data in columns B-D of whatever rows they now overlap.
-    reqs.append({"unmergeCells": {"range": _grid(1, 200)}})
+    # Use ws.col_count (not NC=6) so we cover wider merges left by setup_formula_dashboard,
+    # which creates 14+ columns — a partial-overlap unmerge causes a 400 from the Sheets API.
+    reqs.append({"unmergeCells": {"range": _grid(1, 200, 0, ws.col_count)}})
 
     # Reset all formatting to a clean baseline
     reqs.append(_fmt(1, len(rows), backgroundColor=WHITE,
