@@ -235,3 +235,70 @@ def analyze_batch(reviews: list[Review], project: str, location: str) -> dict:
         credentials=vertex_credentials(),
     )
     return _analyze_with_retry(client, reviews)
+
+
+def generate_narrative(review_analyses: list[dict], project: str, location: str) -> dict:
+    """
+    Generate top_positive_drivers and top_negative_drivers from already-analyzed reviews.
+    Used when all reviews are cached and no batch LLM call was made.
+    Returns {"top_positive_drivers": "...", "top_negative_drivers": "..."}.
+    """
+    from collections import Counter
+
+    theme_pos: Counter = Counter()
+    theme_neg: Counter = Counter()
+    quotes_pos: list[str] = []
+    quotes_neg: list[str] = []
+
+    for r in review_analyses:
+        s = r.get("sentiment", "")
+        for t in r.get("themes", []):
+            if s == "positive":
+                theme_pos[t] += 1
+            elif s == "negative":
+                theme_neg[t] += 1
+        q = r.get("representative_quote")
+        if q:
+            if s == "positive" and len(quotes_pos) < 6:
+                quotes_pos.append(q)
+            elif s in ("negative", "mixed") and len(quotes_neg) < 6:
+                quotes_neg.append(q)
+
+    top_pos = ", ".join(f"{t} ({c})" for t, c in theme_pos.most_common(5))
+    top_neg = ", ".join(f"{t} ({c})" for t, c in theme_neg.most_common(5))
+
+    prompt = f"""You are summarizing pre-analyzed customer reviews for a multi-location carwash company.
+
+Top positive themes (theme: count): {top_pos or "none"}
+Top negative themes (theme: count): {top_neg or "none"}
+
+Sample positive quotes: {" | ".join(quotes_pos) or "none"}
+Sample negative quotes: {" | ".join(quotes_neg) or "none"}
+
+Write exactly two fields as a JSON object:
+- "top_positive_drivers": 2-3 sentences on what is working well across locations
+- "top_negative_drivers": 2-3 sentences on the biggest issues or areas for improvement
+
+Return ONLY valid JSON, no commentary, no markdown code fences."""
+
+    client = genai.Client(
+        vertexai=True,
+        project=project,
+        location=location,
+        credentials=vertex_credentials(),
+    )
+    logger.info("Generating narrative summary from %d cached reviews", len(review_analyses))
+    response = client.models.generate_content(
+        model=GEMINI_MODEL,
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            response_mime_type="application/json",
+            temperature=0.2,
+            max_output_tokens=512,
+        ),
+    )
+    try:
+        return json.loads(_strip_fences(response.text))
+    except json.JSONDecodeError:
+        logger.warning("Narrative generation returned invalid JSON — using empty strings")
+        return {"top_positive_drivers": "", "top_negative_drivers": ""}

@@ -23,7 +23,7 @@ from dotenv import load_dotenv
 
 from config import BASELINE_START, BATCH_SIZE, GCP_LOCATION, GCP_PROJECT
 from dedup import dedup_reviews, make_review_id
-from llm import analyze_batch
+from llm import analyze_batch, generate_narrative
 from models import Review
 from sheets import append_history, read_analyzed_reviews, read_reviews, setup_formula_dashboard, write_current, write_dashboard, write_reviews, write_theme_breakdown
 
@@ -377,6 +377,10 @@ def run(mode: str, dry_run: bool = False) -> None:
 
     # --- Build final summary from all review-level data (deterministic) ---
     all_review_analyses = cached_analyses + new_analyses
+
+    # If all reviews were cached, no batch LLM call ran — generate narrative separately
+    if not summaries:
+        llm_narrative = generate_narrative(all_review_analyses, GCP_PROJECT, GCP_LOCATION)
     final_summary = _build_summary_stats(all_review_analyses)
     final_summary["top_positive_drivers"] = llm_narrative["top_positive_drivers"]
     final_summary["top_negative_drivers"] = llm_narrative["top_negative_drivers"]
