@@ -33,7 +33,8 @@ LOCATIONS = [
     {"place_id": "ChIJq3MX6zWNyIkR2PJtX4UD1dg", "name": "West Manchester"},
     {"place_id": "ChIJoXCCLyYtyIkRpTKJEcL335U", "name": "Mt. Airy"},
     {"place_id": "ChIJdaPibmq9t4kR8nlIXd3l-pQ", "name": "Clinton"},
-    {"place_id": "ChIJMzZkas_9x4kRFjoJslJnhYk", "name": "Middle River"}
+    {"place_id": "ChIJMzZkas_9x4kRFjoJslJnhYk", "name": "Middle River"},
+    {"place_id": "ChIJpSRNNzuPyIkRMNNuUE46qwA", "name": "East York"}
     # Add more: {"place_id": "...", "name": "..."},
 ]
 
@@ -453,6 +454,13 @@ def main():
             weekly_new = max(0, count - prev_count)
         else:
             # First run or missing data → fallback to 7-day filtered
+            weekly_new = len(newest_week)
+
+        # Google's aggregate userRatingCount can lag behind when a review's
+        # text actually becomes visible (or net out against a removed/spam
+        # review), so a delta of 0 doesn't always mean nothing happened.
+        # If we still pulled reviews published in the last 7 days, trust that.
+        if weekly_new == 0 and len(newest_week) > 0:
             weekly_new = len(newest_week)
 
         # Keep original variable so your existing print/Slack/CSV code works
