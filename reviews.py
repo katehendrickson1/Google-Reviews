@@ -2,6 +2,7 @@ import os, sys, csv, re, math, json, pathlib, datetime, requests, gspread,  hash
 from collections import Counter
 from dotenv import load_dotenv
 from google.oauth2.service_account import Credentials
+from db_writer import db_enabled, write_run
 # ---------- Config ----------
 load_dotenv()  # loads .env in same folder
 
@@ -570,6 +571,18 @@ def main():
         upload_to_google_sheets(csv_path, worksheet_name="Google Reviews Data")
     # Write detailed reviews to a separate worksheet
         upsert_reviews_to_sheet(reviews_rows_all, worksheet_name="Reviews (raw)")
+
+    # Write the same run straight into the Shiny Shell database. Last on
+    # purpose: Slack, reports, the sheet and the state file are all done, so a
+    # database problem can't affect them -- it only fails the run at the end.
+    if not db_enabled():
+        print("ℹ️ DB_INSTANCE_CONNECTION_NAME not set; skipping the database write.")
+    elif summary_rows:
+        try:
+            print(write_run(today, summary_rows, reviews_rows_all))
+        except Exception as e:
+            print(f"❌ Database write failed: {e.__class__.__name__}: {e}")
+            sys.exit(1)
 
 
 if __name__ == "__main__":
