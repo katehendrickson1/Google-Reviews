@@ -39,6 +39,10 @@ jobs:
         env:
           GOOGLE_MAPS_API_KEY: ${{ secrets.GOOGLE_MAPS_API_KEY }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }} # optional
+          # Shiny Shell database (db_writer.py); the write is skipped if these aren't set
+          DB_INSTANCE_CONNECTION_NAME: ${{ secrets.DB_INSTANCE_CONNECTION_NAME }}
+          DB_USER: ${{ secrets.DB_USER }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
         run: |
           python reviews.py
 
