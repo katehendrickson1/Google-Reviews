@@ -178,7 +178,7 @@ def _call_llm_with_429_retry(client: genai.Client, reviews: list[Review]) -> dic
         try:
             return _call_llm_raw(client, reviews)
         except genai_errors.ClientError as e:
-            if e.status_code != 429 or delay is None:
+            if e.code != 429 or delay is None:
                 raise
             logger.warning(
                 "429 RESOURCE_EXHAUSTED — waiting %ds before retry %d/%d",
