@@ -1,9 +1,6 @@
 name: Weekly Google Reviews
 
 on:
-  schedule:
-    # Runs every Monday at 15:00 UTC (9:00 AM Denver during MDT, 8:00 AM during MST)
-    - cron: "0 15 * * 1"
   workflow_dispatch: {} # lets you run it manually from the Actions tab
 
 permissions:
