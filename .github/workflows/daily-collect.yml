@@ -1,0 +1,44 @@
+name: Daily Review Collect
+
+on:
+  # Triggered by a Google Cloud Scheduler job (no cron here, same as weekly.yml)
+  workflow_dispatch: {} # lets you run it manually from the Actions tab
+
+# Don't overlap with the weekly run; both write to the same sheet tab and DB
+concurrency:
+  group: google-reviews
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Write service account file
+        run: |
+          echo '${{ secrets.SERVICE_ACCOUNT_JSON }}' > service_account.json
+          echo "GOOGLE_APPLICATION_CREDENTIALS=$PWD/service_account.json" >> $GITHUB_ENV
+
+      # Saves the newest reviews to "Reviews (raw)" and the database only.
+      # No Slack, no reports, and the state file isn't touched.
+      - name: Collect reviews
+        env:
+          GOOGLE_MAPS_API_KEY: ${{ secrets.GOOGLE_MAPS_API_KEY }}
+          DB_INSTANCE_CONNECTION_NAME: ${{ secrets.DB_INSTANCE_CONNECTION_NAME }}
+          DB_USER: ${{ secrets.DB_USER }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+        run: |
+          python reviews.py --collect-only

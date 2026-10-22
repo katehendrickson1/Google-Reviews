@@ -261,6 +261,65 @@ def fetch_legacy_newest(place_id, language="en"):
     data = r.json()
     return (data.get("result") or {})
 
+def fetch_newest_reviews(place_id):
+    # Legacy API only ever returns the 5 newest reviews
+    legacy = fetch_legacy_newest(place_id, language="en")
+    normalized = []
+    for r in legacy.get("reviews", []) or []:
+        normalized.append({
+            "author": r.get("author_name"),
+            "rating": r.get("rating"),
+            "text": r.get("text"),
+            "relativeTime": r.get("relative_time_description"),
+            "publishTime": iso_utc_from_unix(r.get("time")),
+            "profilePhotoUrl": r.get("profile_photo_url"),
+        })
+    return normalized
+
+def review_rows_for(loc, reviews, run_date):
+    return [{
+        "date_run": run_date,
+        "place": loc.get("name") or loc["place_id"],
+        "place_id": loc["place_id"],
+        "author": r.get("author") or "",
+        "rating": r.get("rating"),
+        "publishTime": r.get("publishTime") or "",
+        "relativeTime": r.get("relativeTime") or "",
+        "text": (r.get("text") or "").strip()
+    } for r in reviews]
+
+#--- counting reviews already collected this week ---#
+def review_identity(author, publish_time):
+    # Reviewer + post time, so an edited review (new text) isn't counted twice
+    return ((author or "").strip().lower(), publish_time or "")
+
+def load_cached_reviews_since(since_dt_utc, worksheet_name="Reviews (raw)"):
+    """place_id -> set of review identities already in the raw tab, published since since_dt_utc."""
+    sh = get_gspread_client().open_by_key(SHEET_ID)
+    try:
+        rows = sh.worksheet(worksheet_name).get_all_values()
+    except gspread.WorksheetNotFound:
+        return {}
+    if len(rows) < 2:
+        return {}
+    header = rows[0]
+    author_idx = header.index("author")
+    key_idx = header.index("dedupe_key")
+    cached = {}
+    for row in rows[1:]:
+        if len(row) <= max(author_idx, key_idx):
+            continue
+        # dedupe_key is "place_id\tpublishTime\ttext_hash"; take publishTime from
+        # it since the sheet may have reformatted the publishTime column itself
+        parts = row[key_idx].split("\t")
+        if len(parts) < 2:
+            continue
+        place_id, publish_time = parts[0], parts[1]
+        dt = parse_iso_z(publish_time)
+        if dt and dt >= since_dt_utc:
+            cached.setdefault(place_id, set()).add(review_identity(row[author_idx], publish_time))
+    return cached
+
 # ---------- Sentiment & theming ----------
 def summarize_sentiment(avg_rating, reviews_text_and_star):
     # star-based sentiment from review stars OR fallback to avg rating
@@ -387,6 +446,33 @@ def post_to_slack(webhook_url, loc_name, maps_url, rating, count, sentiment, new
     except Exception as e:
         print("Slack post failed:", e)
 
+def collect():
+    """
+    Daily pull: save each location's newest reviews from the last 7 days to the
+    raw tab and the database, so the weekly run can count more than the 5 the
+    API shows at once. No Slack, reports, summary rows, or state file.
+    """
+    today = datetime.date.today().isoformat()
+    seven_days_ago = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=7)
+
+    reviews_rows_all = []
+    for loc in LOCATIONS:
+        newest_week = reviews_since(fetch_newest_reviews(loc["place_id"]), seven_days_ago)
+        print(f"📍 {loc['name']}: {len(newest_week)} review(s) from the last 7 days")
+        reviews_rows_all.extend(review_rows_for(loc, newest_week, today))
+
+    upsert_reviews_to_sheet(reviews_rows_all, worksheet_name="Reviews (raw)")
+
+    if not db_enabled():
+        print("ℹ️ DB_INSTANCE_CONNECTION_NAME not set; skipping the database write.")
+    elif reviews_rows_all:
+        try:
+            print(write_run(today, [], reviews_rows_all))
+        except Exception as e:
+            print(f"❌ Database write failed: {e.__class__.__name__}: {e}")
+            sys.exit(1)
+
+
 def main():
     today = datetime.date.today().isoformat()
     out_dir = os.path.join("reports", today)
@@ -395,6 +481,10 @@ def main():
 
     summary_rows = []
     reviews_rows_all = []
+
+    # Reviews the daily collect runs already saved for this week
+    seven_days_ago = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=7)
+    cached_week = load_cached_reviews_since(seven_days_ago)
 
     for loc in LOCATIONS:
         pid = loc["place_id"]
@@ -413,37 +503,18 @@ def main():
         new_reviews = new.get("reviews") or []
 
         # --- Legacy API for newest reviews ---
-        legacy = fetch_legacy_newest(pid, language="en")
-        legacy_reviews = legacy.get("reviews", []) or []
-        normalized_newest = []
-        for r in legacy_reviews:
-            normalized_newest.append({
-                "author": r.get("author_name"),
-                "rating": r.get("rating"),
-                "text": r.get("text"),
-                "relativeTime": r.get("relative_time_description"),
-                "publishTime": iso_utc_from_unix(r.get("time")),
-                "profilePhotoUrl": r.get("profile_photo_url"),
-            })
+        normalized_newest = fetch_newest_reviews(pid)
 
-            # --- 7-day filtered newest reviews ---
-        now_utc = datetime.datetime.now(datetime.timezone.utc)
-        seven_days_ago = now_utc - datetime.timedelta(days=7)
+        # --- 7-day filtered newest reviews ---
         newest_week = reviews_since(normalized_newest, seven_days_ago)
         sample_7d = len(newest_week)  # keep this metric if you like
 
-        # ✅ INSERT THE DETAIL ROW BUILDER *RIGHT HERE*
-        for r in newest_week:  # last 7 days only
-            reviews_rows_all.append({
-                "date_run": today,
-                "place": name,
-                "place_id": pid,
-                "author": r.get("author") or "",
-                "rating": r.get("rating"),
-                "publishTime": r.get("publishTime") or "",
-                "relativeTime": r.get("relativeTime") or "",
-                "text": (r.get("text") or "").strip()
-            })
+        reviews_rows_all.extend(review_rows_for(loc, newest_week, today))  # last 7 days only
+
+        # Every distinct review we've seen from the last 7 days: what the daily
+        # collect runs saved plus what this run just pulled
+        week_identities = set(cached_week.get(pid, set()))
+        week_identities.update(review_identity(r.get("author"), r.get("publishTime")) for r in newest_week)
 
         # --- Weekly "new reviews" count based on 7-day window ---
         # --- Weekly "new reviews" count based on review count delta ---
@@ -459,10 +530,10 @@ def main():
 
         # Google's aggregate userRatingCount can lag behind when a review's
         # text actually becomes visible (or net out against a removed/spam
-        # review), so a delta of 0 doesn't always mean nothing happened.
-        # If we still pulled reviews published in the last 7 days, trust that.
-        if weekly_new == 0 and len(newest_week) > 0:
-            weekly_new = len(newest_week)
+        # review), so the delta can come in low (0, 1, ...) even when more
+        # reviews were posted. The reviews we actually saw from the last
+        # 7 days are a hard floor, so never report fewer than that.
+        weekly_new = max(weekly_new, len(week_identities))
 
         # Keep original variable so your existing print/Slack/CSV code works
         weekly_new_clamped = weekly_new
@@ -586,4 +657,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if "--collect-only" in sys.argv[1:]:
+        collect()
+    else:
+        main()

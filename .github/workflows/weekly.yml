@@ -6,6 +6,11 @@ on:
 permissions:
   contents: write # <-- allow pushing the updated state file
 
+# Don't overlap with the daily collect run (daily-collect.yml)
+concurrency:
+  group: google-reviews
+  cancel-in-progress: false
+
 jobs:
   run:
     runs-on: ubuntu-latest
