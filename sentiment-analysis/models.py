@@ -12,3 +12,7 @@ class Review:
     relative_time: str
     text: str
     date_run: str
+    # reviews.review_id when the review was read from the Shiny Shell
+    # database (daily mode); sent to the LLM as the review's id so results
+    # map back to the row exactly. None for reviews read from the Sheet.
+    db_review_id: int | None = None

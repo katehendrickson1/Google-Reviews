@@ -58,7 +58,10 @@ Reviews:
 
 
 def _format_review(n: int, r: Review) -> str:
-    return f'{n}. Location: {r.place} | Author: {r.author} | Stars: {r.star_rating} | dedupe_key: {make_review_id(r)}\n"{r.text}"'
+    # Reviews from the database go in with their database id, so each
+    # result maps back to exactly one row; Sheet reviews keep author|date.
+    review_key = r.db_review_id if r.db_review_id is not None else make_review_id(r)
+    return f'{n}. Location: {r.place} | Author: {r.author} | Stars: {r.star_rating} | dedupe_key: {review_key}\n"{r.text}"'
 
 
 def _strip_fences(text: str) -> str:

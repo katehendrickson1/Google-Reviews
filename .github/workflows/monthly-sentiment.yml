@@ -32,4 +32,10 @@ jobs:
 
       - name: Run monthly sentiment analysis
         working-directory: sentiment-analysis
+        # The database's stored results (from Daily Sentiment) are used before
+        # re-analyzing, so the PDF matches the dashboard.
+        env:
+          DB_INSTANCE_CONNECTION_NAME: ${{ secrets.DB_INSTANCE_CONNECTION_NAME }}
+          DB_USER: ${{ secrets.DB_USER }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
         run: python main.py --mode monthly

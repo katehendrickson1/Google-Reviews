@@ -1,0 +1,78 @@
+name: Daily Sentiment
+
+# Analyzes reviews in the Shiny Shell database that have no sentiment result
+# yet (sentiment-analysis/main.py --mode daily) and writes per-review results
+# for the dashboard's Customer Sentiment page. Runs after each successful
+# "Daily Review Collect" run. The first run is the backfill of every
+# unanalyzed review since Oct 2025.
+#
+# Manual runs (Actions tab -> Daily Sentiment -> Run workflow):
+#   mode import-sheet  one-time, before the first daily run: copy the monthly
+#                      runs' existing results from the Sheet (free, and they
+#                      match the PDFs already sent)
+#   dry_run            print what would be written; write nothing
+#   limit              analyze at most this many reviews (daily mode)
+
+on:
+  workflow_run:
+    workflows: ["Daily Review Collect"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "daily or import-sheet"
+        type: choice
+        options: [daily, import-sheet]
+        default: daily
+      dry_run:
+        description: "Dry run (write nothing)"
+        type: boolean
+        default: false
+      limit:
+        description: "Daily mode: max reviews to analyze (blank = all)"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: review-sentiment
+  cancel-in-progress: false
+
+jobs:
+  run:
+    # After a collect run, only when it succeeded.
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r sentiment-analysis/requirements.txt
+
+      - name: Write service account file
+        run: |
+          echo '${{ secrets.SERVICE_ACCOUNT_JSON }}' > service_account.json
+          echo "GOOGLE_APPLICATION_CREDENTIALS=$PWD/service_account.json" >> $GITHUB_ENV
+
+      - name: Run sentiment analysis
+        working-directory: sentiment-analysis
+        env:
+          DB_INSTANCE_CONNECTION_NAME: ${{ secrets.DB_INSTANCE_CONNECTION_NAME }}
+          DB_USER: ${{ secrets.DB_USER }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+          MODE: ${{ inputs.mode || 'daily' }}
+          DRY_RUN: ${{ inputs.dry_run && '--dry-run' || '' }}
+          LIMIT: ${{ inputs.limit }}
+        run: |
+          args="--mode $MODE $DRY_RUN"
+          if [ "$MODE" = "daily" ] && [ -n "$LIMIT" ]; then args="$args --limit $LIMIT"; fi
+          python main.py $args
