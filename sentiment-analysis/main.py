@@ -5,6 +5,14 @@ Usage:
     python main.py --mode baseline          # all reviews from Oct 2025 to today
     python main.py --mode monthly           # reviews from last calendar month
     python main.py --mode baseline --dry-run  # print JSON, don't write to Sheet
+    python main.py --mode daily             # analyze reviews in the database not yet analyzed
+    python main.py --mode daily --limit 20 --dry-run   # try a few, write nothing
+    python main.py --mode import-sheet      # one-time: copy the Sheet's existing results into the database
+
+Daily and import-sheet read and write the Shiny Shell database (see
+sentiment_db.py) for the dashboard's Customer Sentiment page; they don't
+touch the Sheet. When the database is configured, monthly and backfill use
+the database's results first, so the PDF and the dashboard agree.
 
 Credentials:
     Set GOOGLE_APPLICATION_CREDENTIALS to your service_account.json path,
@@ -21,7 +29,8 @@ import calendar
 
 from dotenv import load_dotenv
 
-from config import BASELINE_START, BATCH_SIZE, GCP_LOCATION, GCP_PROJECT
+import sentiment_db
+from config import BASELINE_START, BATCH_SIZE, GCP_LOCATION, GCP_PROJECT, GEMINI_MODEL
 from dedup import dedup_reviews, make_review_id
 from llm import analyze_batch, generate_narrative
 from models import Review
@@ -34,6 +43,138 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger(__name__)
+
+
+def _load_cache() -> dict[str, dict]:
+    """Results from the Sheet, overridden by the database's (the dashboard's) when configured."""
+    cache = read_analyzed_reviews()
+    if sentiment_db.db_enabled():
+        try:
+            connector, conn = sentiment_db.connect()
+            try:
+                db_cache = sentiment_db.read_analyses_cache(conn)
+            finally:
+                conn.close()
+                connector.close()
+        except Exception:
+            # The PDF still goes out on the Sheet's results.
+            logger.exception("Couldn't read stored results from the database -- using the Sheet's only")
+            return cache
+        logger.info("Database: %d stored review analyses (used before the Sheet's)", len(db_cache))
+        cache.update(db_cache)
+    return cache
+
+
+def run_daily(dry_run: bool = False, limit: int | None = None) -> None:
+    """
+    Analyze every text review in the database that has no result yet, in
+    batches, committing after each batch (a failure keeps earlier batches;
+    the next run picks up the rest). The first run is the backfill.
+    """
+    if not sentiment_db.db_enabled():
+        raise RuntimeError("DB_INSTANCE_CONNECTION_NAME is not set -- daily mode needs the database")
+
+    connector, conn = sentiment_db.connect()
+    try:
+        reviews = sentiment_db.read_unanalyzed(conn)
+        logger.info("Unanalyzed text reviews in the database: %d", len(reviews))
+        if limit:
+            reviews = reviews[:limit]
+        if not reviews:
+            logger.info("Nothing to analyze.")
+            return
+        known_staff = sentiment_db.read_known_staff(conn)
+
+        written = mentions = missing = 0
+        total_batches = (len(reviews) + BATCH_SIZE - 1) // BATCH_SIZE
+        for i in range(0, len(reviews), BATCH_SIZE):
+            batch = reviews[i : i + BATCH_SIZE]
+            logger.info("Batch %d/%d: %d reviews", i // BATCH_SIZE + 1, total_batches, len(batch))
+            result = analyze_batch(batch, GCP_PROJECT, GCP_LOCATION)
+
+            # Keep only results that map back to a review in this batch.
+            wanted = {str(r.db_review_id): r.db_review_id for r in batch}
+            analyses: dict[int, dict] = {}
+            for a in result.get("reviews", []):
+                rid = wanted.get(str(a.get("review_id", "")).strip())
+                if rid is not None:
+                    analyses[rid] = a
+            missing += len(batch) - len(analyses)
+            if len(analyses) < len(batch):
+                logger.warning("Batch returned %d of %d reviews; the rest are retried next run",
+                               len(analyses), len(batch))
+
+            if dry_run:
+                print(json.dumps({str(k): v for k, v in analyses.items()}, indent=2, ensure_ascii=False))
+                written += len(analyses)
+                continue
+            try:
+                n, m = sentiment_db.write_analyses(
+                    conn, analyses, sentiment_db.SOURCE_DAILY, GEMINI_MODEL, known_staff)
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            written += n
+            mentions += m
+
+        logger.info("%s %d review analyses (%d staff mentions); %d not returned by the model.",
+                    "Dry run: would write" if dry_run else "Wrote", written, mentions, missing)
+    finally:
+        conn.close()
+        connector.close()
+
+
+def run_import_sheet(dry_run: bool = False) -> None:
+    """
+    One-time: copy the monthly runs' existing per-review results (Sentiment -
+    Reviews tab) into the database for reviews not yet analyzed there, so past
+    results match the PDFs already sent and cost nothing. Matched on place
+    name + author + publish date (the Sheet's review_id); a key shared by two
+    database reviews is skipped (left for daily mode). Run before the first
+    daily run.
+    """
+    if not sentiment_db.db_enabled():
+        raise RuntimeError("DB_INSTANCE_CONNECTION_NAME is not set -- import-sheet needs the database")
+
+    sheet = read_analyzed_reviews()
+    by_key = {(a.get("location", "").strip().lower(), rid): a for rid, a in sheet.items()}
+
+    connector, conn = sentiment_db.connect()
+    try:
+        reviews = sentiment_db.read_unanalyzed(conn)
+        ids_by_key: dict[tuple, list[int]] = defaultdict(list)
+        for r in reviews:
+            ids_by_key[(r.place.strip().lower(), make_review_id(r))].append(r.db_review_id)
+
+        analyses: dict[int, dict] = {}
+        ambiguous = 0
+        for key, ids in ids_by_key.items():
+            if key not in by_key:
+                continue
+            if len(ids) > 1:
+                ambiguous += len(ids)
+                continue
+            analyses[ids[0]] = by_key[key]
+        logger.info(
+            "Sheet results: %d | unanalyzed database reviews: %d | matched: %d | ambiguous (skipped): %d | "
+            "left for daily mode: %d",
+            len(sheet), len(reviews), len(analyses), ambiguous, len(reviews) - len(analyses),
+        )
+        if dry_run or not analyses:
+            return
+        known_staff = sentiment_db.read_known_staff(conn)
+        try:
+            n, m = sentiment_db.write_analyses(
+                conn, analyses, sentiment_db.SOURCE_SHEET_IMPORT, None, known_staff)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        logger.info("Imported %d review analyses (%d staff mentions).", n, m)
+    finally:
+        conn.close()
+        connector.close()
 
 
 def _monthly_period() -> tuple[date, date]:
@@ -232,7 +373,7 @@ def run_backfill(dry_run: bool = False) -> None:
     all_raw = read_reviews(since=baseline_start)
     logger.info("Total raw reviews loaded: %d", len(all_raw))
 
-    cache = read_analyzed_reviews()
+    cache = _load_cache()
     logger.info("Cache: %d previously analyzed reviews", len(cache))
 
     all_backfill_analyses: list[dict] = []
@@ -350,7 +491,7 @@ def run(mode: str, dry_run: bool = False) -> None:
         return
 
     # --- Load cached analyses, call LLM only for new reviews ---
-    cache = read_analyzed_reviews()
+    cache = _load_cache()
     new_reviews = [r for r in text_reviews if make_review_id(r) not in cache]
     cached_analyses = [cache[make_review_id(r)] for r in text_reviews if make_review_id(r) in cache]
     logger.info("Cached: %d | New (need LLM): %d", len(cached_analyses), len(new_reviews))
@@ -426,17 +567,26 @@ def run(mode: str, dry_run: bool = False) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Google Reviews Sentiment Analysis")
     parser.add_argument(
-        "--mode", choices=["baseline", "monthly", "backfill", "setup-dashboard"], required=True,
-        help="baseline = all reviews from Oct 2025; monthly = last calendar month; backfill = month-by-month Oct 2025 → last complete month; setup-dashboard = write formula-driven Dashboard tab",
+        "--mode", choices=["baseline", "monthly", "backfill", "setup-dashboard", "daily", "import-sheet"],
+        required=True,
+        help="baseline = all reviews from Oct 2025; monthly = last calendar month; backfill = month-by-month Oct 2025 → last complete month; setup-dashboard = write formula-driven Dashboard tab; daily = analyze database reviews not yet analyzed; import-sheet = one-time copy of the Sheet's results into the database",
     )
     parser.add_argument(
         "--dry-run", action="store_true",
-        help="Print JSON to stdout instead of writing to the Sheet",
+        help="Print JSON / counts instead of writing to the Sheet or database",
+    )
+    parser.add_argument(
+        "--limit", type=int, default=None,
+        help="daily mode: analyze at most this many reviews (for testing)",
     )
     args = parser.parse_args()
 
     try:
-        if args.mode == "backfill":
+        if args.mode == "daily":
+            run_daily(dry_run=args.dry_run, limit=args.limit)
+        elif args.mode == "import-sheet":
+            run_import_sheet(dry_run=args.dry_run)
+        elif args.mode == "backfill":
             run_backfill(dry_run=args.dry_run)
         elif args.mode == "setup-dashboard":
             setup_formula_dashboard()
