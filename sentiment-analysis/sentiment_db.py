@@ -6,6 +6,8 @@ Shiny Shell Database Migration repo:
     review_sentiment, review_themes, review_staff_mentions
   mysql-pilot/69_create_review_sentiment_views.sql
     v_google_reviews (deduplicated, with review_id and has_text)
+  mysql-pilot/72_review_theme_sentiment.sql
+    review_themes.theme_sentiment (v3 prompt), v2 backup tables
 
 Reviews are read from v_google_reviews (so the same review collected twice,
 e.g. once auto-translated, is analyzed once) and results are keyed on
@@ -21,7 +23,7 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-from config import BASELINE_START
+from config import BASELINE_START, PROMPT_VERSION
 from dedup import make_review_id
 from models import Review
 
@@ -39,6 +41,8 @@ __all__ = [
 SENTIMENTS = {"positive", "neutral", "negative", "mixed"}
 SOURCE_DAILY = "gemini_daily"
 SOURCE_SHEET_IMPORT = "sheet_import"
+SOURCE_RERUN = "gemini_rerun"  # --mode reanalyze: results redone with a newer prompt
+THEME_SENTIMENTS = {"positive", "neutral", "negative", "mixed"}
 
 # Staff names already stored at a location are reused when a new name is
 # within this edit distance (same rule as llm._normalize_staff_names), but
@@ -57,9 +61,10 @@ def _iso(dt) -> str:
     return dt.strftime("%Y-%m-%dT%H:%M:%SZ") if dt else ""
 
 
-def read_unanalyzed(conn) -> list[Review]:
+def read_unanalyzed(conn, outdated: bool = False) -> list[Review]:
     """
-    Text reviews since BASELINE_START with no review_sentiment row yet,
+    Text reviews since BASELINE_START with no review_sentiment row yet
+    (with outdated=True: also those analyzed with an older prompt version),
     ordered by location then date so a batch holds reviews from few
     locations (the prompt merges staff-name spellings within a location).
     Review.place is the Google place name used in the Sheet (e.g. "Mt. Airy").
@@ -76,12 +81,12 @@ def read_unanalyzed(conn) -> list[Review]:
               ON a.location_id = l.location_id
              AND a.source_system = 'google_places' AND a.valid_to IS NULL
             LEFT JOIN review_sentiment s ON s.review_id = g.review_id
-            WHERE s.review_id IS NULL
+            WHERE (s.review_id IS NULL OR (%s AND s.prompt_version <> %s))
               AND g.has_text = 1
               AND g.published_date >= %s
             ORDER BY g.location, g.published_date, g.review_id
             """,
-            (BASELINE_START,),
+            (1 if outdated else 0, PROMPT_VERSION, BASELINE_START),
         )
         rows = cur.fetchall()
 
@@ -165,10 +170,13 @@ def _score(v):
 
 
 def write_analyses(conn, analyses: dict[int, dict], source: str, model: str | None,
-                   known_staff: dict[int, set[str]]) -> tuple[int, int]:
+                   known_staff: dict[int, set[str]],
+                   prompt_version: str = PROMPT_VERSION) -> tuple[int, int]:
     """
     Upsert one result per review_id (themes and staff names replaced) in the
     caller's transaction. `known_staff` is updated with the names written.
+    Each theme is stored with its own sentiment (theme_sentiments, v3) or
+    NULL when there is none (v2 results).
     Returns (reviews written, staff mentions written).
     """
     now = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
@@ -187,7 +195,7 @@ def write_analyses(conn, analyses: dict[int, dict], source: str, model: str | No
                   review_id, sentiment, sentiment_score, needs_ops_followup,
                   representative_quote, positive_aspects, negative_aspects,
                   analysis_source, model, prompt_version, analyzed_at
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'v2', %s)
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON DUPLICATE KEY UPDATE
                   sentiment = VALUES(sentiment),
                   sentiment_score = VALUES(sentiment_score),
@@ -203,12 +211,17 @@ def write_analyses(conn, analyses: dict[int, dict], source: str, model: str | No
                 (review_id, sentiment[:16] or "neutral", _score(a.get("sentiment_score")),
                  1 if a.get("needs_ops_followup") is True else 0,
                  quote, _aspects(a.get("positive_aspects")), _aspects(a.get("negative_aspects")),
-                 source, model, now),
+                 source, model, prompt_version, now),
             )
             cur.execute("DELETE FROM review_themes WHERE review_id = %s", (review_id,))
+            theme_sents = a.get("theme_sentiments") if isinstance(a.get("theme_sentiments"), dict) else {}
+            theme_sents = {str(k).strip().lower(): str(v).strip().lower() for k, v in theme_sents.items()}
             themes = {str(t).strip().lower()[:40] for t in (a.get("themes") or []) if str(t).strip()}
             for theme in sorted(themes):
-                cur.execute("INSERT INTO review_themes (review_id, theme) VALUES (%s, %s)", (review_id, theme))
+                ts = theme_sents.get(theme)
+                cur.execute(
+                    "INSERT INTO review_themes (review_id, theme, theme_sentiment) VALUES (%s, %s, %s)",
+                    (review_id, theme, ts if ts in THEME_SENTIMENTS else None))
 
             cur.execute("DELETE FROM review_staff_mentions WHERE review_id = %s", (review_id,))
             location_id = locations.get(review_id)

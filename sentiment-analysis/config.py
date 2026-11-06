@@ -13,6 +13,9 @@ LOCATION_HOTSPOT_MIN = 3  # min negative/mixed reviews on same theme at one loca
 GCP_PROJECT = "places-review-test-469517"
 GCP_LOCATION = "us-central1"
 GEMINI_MODEL = "gemini-2.5-flash-lite"
+# Stored with each result in the database (review_sentiment.prompt_version).
+# v3 (2026-11-06) = v2 + a sentiment per theme + the safety definition.
+PROMPT_VERSION = "v3"
 
 # 75 reviews per batch keeps the JSON response well under the 65k output token limit.
 # March 2026 at 139 reviews hit the truncation threshold; 75 gives a comfortable margin.
