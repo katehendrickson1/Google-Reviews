@@ -10,8 +10,11 @@ name: Daily Sentiment
 #   mode import-sheet  one-time, before the first daily run: copy the monthly
 #                      runs' existing results from the Sheet (free, and they
 #                      match the PDFs already sent)
+#   mode reanalyze     after a new PROMPT_VERSION (config.py): redo every
+#                      result stored with an older prompt (resumable: run
+#                      again until it reports nothing left)
 #   dry_run            print what would be written; write nothing
-#   limit              analyze at most this many reviews (daily mode)
+#   limit              analyze at most this many reviews (daily / reanalyze)
 
 on:
   workflow_run:
@@ -20,16 +23,16 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "daily or import-sheet"
+        description: "daily, import-sheet or reanalyze"
         type: choice
-        options: [daily, import-sheet]
+        options: [daily, import-sheet, reanalyze]
         default: daily
       dry_run:
         description: "Dry run (write nothing)"
         type: boolean
         default: false
       limit:
-        description: "Daily mode: max reviews to analyze (blank = all)"
+        description: "Daily / reanalyze: max reviews to analyze (blank = all)"
         type: string
         default: ""
 
@@ -74,5 +77,5 @@ jobs:
           LIMIT: ${{ inputs.limit }}
         run: |
           args="--mode $MODE $DRY_RUN"
-          if [ "$MODE" = "daily" ] && [ -n "$LIMIT" ]; then args="$args --limit $LIMIT"; fi
+          if [ "$MODE" != "import-sheet" ] && [ -n "$LIMIT" ]; then args="$args --limit $LIMIT"; fi
           python main.py $args

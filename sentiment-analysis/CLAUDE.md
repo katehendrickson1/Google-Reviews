@@ -97,9 +97,17 @@ Columns currently in the Raw Reviews tab:
 3. **Skip empty-text reviews from LLM call** — they cost tokens and return nothing useful. Count them separately in summary based on star rating only.
 4. **Author name accents** — strip diacritics when deduplicating but preserve original in raw data.
 
-## The Locked LLM Prompt (v2)
+## The Locked LLM Prompt (v3)
 
-This prompt has been tested against a 17-review sample and validated. **Do not modify the theme list or core rules without discussion.**
+v2 was tested against a 17-review sample and validated. **v3 (2026-11-06, agreed with Kate)** adds three things and changes nothing else:
+
+- `theme_sentiments`: a sentiment per tagged theme (what the review says about that theme only). Before, every theme took the review's overall sentiment, so a 5-star review praising the vacuums with one complaint about the drive counted as a vacuum complaint on the dashboard. Stored in the database as `review_themes.theme_sentiment` (mysql-pilot/72).
+- A definition of `safety` (physical danger or risk; playgrounds are vacuums_amenities; guiding a car onto the conveyor is staff_helpfulness).
+- Complaints about things outside the business (the drive there, public roads, weather) get no theme.
+
+Tested 2026-11-06 on 41 reviews (mixed 4-5 star, safety-tagged, multi-theme negatives, controls), run twice against a fresh v2 run: every theme got a valid sentiment, the two runs agreed on 41/41 overall sentiments and 97% of theme sentiments, theme complaints dropped from 101 to about 52 (the rest were praise counted as complaints), and every safety complaint was real. Known limits: Gemini still tags some "safe playground" mentions as safety (positive, so no false complaint), and which minor themes get tagged varies between runs with either prompt. The model sometimes leaves a review out of its answer (about 2 in 41); `analyze_batch` asks again for those.
+
+**Do not modify the theme list or core rules without discussion.** The text below is a copy of `_PROMPT_TEMPLATE` in `llm.py` (the code is the source of truth).
 
 ```
 You are analyzing customer reviews of a multi-location carwash company. Return ONE valid JSON object with two keys: "reviews" (array, one object per review) and "summary" (one object covering the full batch).
@@ -107,6 +115,8 @@ You are analyzing customer reviews of a multi-location carwash company. Return O
 THEME RULES (read carefully):
 - Use ONLY themes from this list: staff_friendliness, staff_helpfulness, equipment_reliability, wash_quality, vehicle_damage, membership_subscription, pricing, service_recovery, vacuums_amenities, safety, cleanliness, facility_condition, members_lounge, general_positive, general_negative.
 - Do NOT invent new themes for one-off issues. Fold rare complaints into the closest existing theme. Examples: sticker/adhesive residue → wash_quality; broken kiosk → equipment_reliability; well-stocked or low-supply → facility_condition; long wait → equipment_reliability; rude billing dispute → membership_subscription; soda machine, free drinks, members lounge, drink station → members_lounge. Only invent a new theme if the SAME novel topic appears in 3+ reviews in this batch AND no existing theme can plausibly hold it.
+- Only tag a theme the review actually talks about. Complaints about things outside the business (the drive or route to get there, traffic on public roads, weather) get no theme; mention them in negative_aspects only.
+- safety means physical danger or risk: injuries or near-misses, unsafe driving or traffic on the lot or in the tunnel, unsafe equipment or conditions (ice, broken glass, a gate hitting a car while someone is in it), or feeling unsafe because of people. It does NOT mean a family-friendly or welcoming atmosphere, the drive to the location, or general comfort. Playgrounds, kids' play areas and water blasters are vacuums_amenities, not safety, even when called "safe" or "fenced". A staff member guiding the car onto the conveyor is staff_helpfulness, not safety.
 - Tag ALL applicable themes per review, not just the dominant one. A review praising both friendliness AND helpfulness must get both tags. A review with three complaints gets three negative-leaning theme tags. Service recovery scenarios get service_recovery PLUS any other applicable themes.
 
 STAFF NAME RULES:
@@ -121,6 +131,7 @@ PER-REVIEW FIELDS:
 - sentiment: "positive" | "neutral" | "negative" | "mixed"
 - sentiment_score: number from -1.0 (most negative) to +1.0 (most positive)
 - themes: array of theme tags from the approved list (use ALL that apply)
+- theme_sentiments: object with one key per tag in themes, valued "positive" | "negative" | "mixed" | "neutral": what the customer says about THAT theme only, ignoring the rest of the review. Example: "Best vacuums, love the soda fountain, but it's a long drive" → {"vacuums_amenities": "positive", "members_lounge": "positive", "general_positive": "positive"}. Use mixed only when the review both praises and criticizes that same theme.
 - positive_aspects: short array of what was praised (or [])
 - negative_aspects: short array of complaints (or [])
 - staff_mentioned: array of normalized employee first names (or [])
@@ -140,7 +151,7 @@ Return ONLY valid JSON, no commentary, no markdown code fences.
 
 Reviews:
 
-[reviews go here, formatted as in the test]
+{reviews}
 ```
 
 ### Review formatting for the prompt
@@ -167,7 +178,7 @@ If review text is empty, **do not send the review to the LLM** — count it in t
 | `pricing`                 | Cost complaints or value praise                                       |
 | `service_recovery`        | Issue was previously bad, was made right by staff/company             |
 | `vacuums_amenities`       | Vacuums, interior cleaning stations, free amenities                   |
-| `safety`                  | Anything safety-related (loose items, blocked sight lines, etc.)      |
+| `safety`                  | Physical danger or risk: injuries, near-misses, unsafe driving on the lot or in the tunnel, unsafe equipment or conditions, feeling unsafe because of people (v3). Not playgrounds or a family-friendly feel |
 | `cleanliness`             | Cleanliness of the facility itself                                    |
 | `facility_condition`      | Stocked supplies, equipment present, general site upkeep              |
 | `members_lounge`          | Soda machine, free drinks, drink station, members lounge experience   |
@@ -241,7 +252,7 @@ At ~50–80 reviews/month, Gemini 3.1 Flash Lite costs will be pennies per run. 
 
 ## Working Notes for Claude Code
 
-- **Do not modify the v2 prompt or theme taxonomy without discussing with Kate first.** Both have been tested and locked.
+- **Do not modify the v3 prompt or theme taxonomy without discussing with Kate first.** Both have been tested and locked. A new prompt version gets a new `PROMPT_VERSION` in config.py; `python main.py --mode reanalyze` then redoes the database results stored with an older version (resumable: run it until it reports nothing left).
 - **Always filter empty-text reviews before sending to the LLM.** Don't waste tokens on them.
 - **Star rating is a sanity check on LLM sentiment.** If LLM marks a 5-star review as negative or a 1-star as positive, log a warning — likely a parsing issue or sarcastic review.
 - **Names are normalized within batch by the LLM.** Add a fuzzy-match post-processing step in Python as a safety net (e.g., Levenshtein distance < 2 + same location = same person).

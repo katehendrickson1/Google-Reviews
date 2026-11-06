@@ -7,6 +7,7 @@ Usage:
     python main.py --mode baseline --dry-run  # print JSON, don't write to Sheet
     python main.py --mode daily             # analyze reviews in the database not yet analyzed
     python main.py --mode daily --limit 20 --dry-run   # try a few, write nothing
+    python main.py --mode reanalyze         # redo results from an older prompt version (resumable)
     python main.py --mode import-sheet      # one-time: copy the Sheet's existing results into the database
 
 Daily and import-sheet read and write the Shiny Shell database (see
@@ -30,7 +31,7 @@ import calendar
 from dotenv import load_dotenv
 
 import sentiment_db
-from config import BASELINE_START, BATCH_SIZE, GCP_LOCATION, GCP_PROJECT, GEMINI_MODEL
+from config import BASELINE_START, BATCH_SIZE, GCP_LOCATION, GCP_PROJECT, GEMINI_MODEL, PROMPT_VERSION
 from dedup import dedup_reviews, make_review_id
 from llm import analyze_batch, generate_narrative
 from models import Review
@@ -65,19 +66,24 @@ def _load_cache() -> dict[str, dict]:
     return cache
 
 
-def run_daily(dry_run: bool = False, limit: int | None = None) -> None:
+def run_daily(dry_run: bool = False, limit: int | None = None, reanalyze: bool = False) -> None:
     """
     Analyze every text review in the database that has no result yet, in
     batches, committing after each batch (a failure keeps earlier batches;
     the next run picks up the rest). The first run is the backfill.
+
+    reanalyze=True also redoes results stored with an older prompt version
+    (PROMPT_VERSION in config.py), e.g. the one-time v2 -> v3 re-run; run it
+    again until it reports nothing left.
     """
     if not sentiment_db.db_enabled():
         raise RuntimeError("DB_INSTANCE_CONNECTION_NAME is not set -- daily mode needs the database")
 
     connector, conn = sentiment_db.connect()
     try:
-        reviews = sentiment_db.read_unanalyzed(conn)
-        logger.info("Unanalyzed text reviews in the database: %d", len(reviews))
+        reviews = sentiment_db.read_unanalyzed(conn, outdated=reanalyze)
+        logger.info("%s text reviews in the database: %d",
+                    f"Unanalyzed or pre-{PROMPT_VERSION}" if reanalyze else "Unanalyzed", len(reviews))
         if limit:
             reviews = reviews[:limit]
         if not reviews:
@@ -110,7 +116,8 @@ def run_daily(dry_run: bool = False, limit: int | None = None) -> None:
                 continue
             try:
                 n, m = sentiment_db.write_analyses(
-                    conn, analyses, sentiment_db.SOURCE_DAILY, GEMINI_MODEL, known_staff)
+                    conn, analyses, sentiment_db.SOURCE_RERUN if reanalyze else sentiment_db.SOURCE_DAILY,
+                    GEMINI_MODEL, known_staff)
                 conn.commit()
             except Exception:
                 conn.rollback()
@@ -166,7 +173,8 @@ def run_import_sheet(dry_run: bool = False) -> None:
         known_staff = sentiment_db.read_known_staff(conn)
         try:
             n, m = sentiment_db.write_analyses(
-                conn, analyses, sentiment_db.SOURCE_SHEET_IMPORT, None, known_staff)
+                conn, analyses, sentiment_db.SOURCE_SHEET_IMPORT, None, known_staff,
+                prompt_version="v2")
             conn.commit()
         except Exception:
             conn.rollback()
@@ -567,9 +575,9 @@ def run(mode: str, dry_run: bool = False) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Google Reviews Sentiment Analysis")
     parser.add_argument(
-        "--mode", choices=["baseline", "monthly", "backfill", "setup-dashboard", "daily", "import-sheet"],
+        "--mode", choices=["baseline", "monthly", "backfill", "setup-dashboard", "daily", "import-sheet", "reanalyze"],
         required=True,
-        help="baseline = all reviews from Oct 2025; monthly = last calendar month; backfill = month-by-month Oct 2025 → last complete month; setup-dashboard = write formula-driven Dashboard tab; daily = analyze database reviews not yet analyzed; import-sheet = one-time copy of the Sheet's results into the database",
+        help="baseline = all reviews from Oct 2025; monthly = last calendar month; backfill = month-by-month Oct 2025 → last complete month; setup-dashboard = write formula-driven Dashboard tab; daily = analyze database reviews not yet analyzed; import-sheet = one-time copy of the Sheet's results into the database; reanalyze = daily, plus redo results from an older prompt version",
     )
     parser.add_argument(
         "--dry-run", action="store_true",
@@ -577,13 +585,15 @@ def main() -> None:
     )
     parser.add_argument(
         "--limit", type=int, default=None,
-        help="daily mode: analyze at most this many reviews (for testing)",
+        help="daily / reanalyze: analyze at most this many reviews (for testing)",
     )
     args = parser.parse_args()
 
     try:
         if args.mode == "daily":
             run_daily(dry_run=args.dry_run, limit=args.limit)
+        elif args.mode == "reanalyze":
+            run_daily(dry_run=args.dry_run, limit=args.limit, reanalyze=True)
         elif args.mode == "import-sheet":
             run_import_sheet(dry_run=args.dry_run)
         elif args.mode == "backfill":

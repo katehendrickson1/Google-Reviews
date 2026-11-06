@@ -13,14 +13,20 @@ from models import Review
 
 logger = logging.getLogger(__name__)
 
-# Locked v2 prompt — do not modify without discussing with Kate first.
-# Tested against a 17-review sample and validated.
+# Locked v3 prompt — do not modify without discussing with Kate first.
+# v2 was tested against a 17-review sample and validated. v3 (2026-11-06)
+# adds theme_sentiments (what the review says about each theme, so a
+# complaint about one thing no longer makes every theme a complaint), a
+# definition of safety, and no theme for complaints outside the business.
+# Tested on 41 reviews (twice) against v2; see CLAUDE.md.
 _PROMPT_TEMPLATE = """\
 You are analyzing customer reviews of a multi-location carwash company. Return ONE valid JSON object with two keys: "reviews" (array, one object per review) and "summary" (one object covering the full batch).
 
 THEME RULES (read carefully):
 - Use ONLY themes from this list: staff_friendliness, staff_helpfulness, equipment_reliability, wash_quality, vehicle_damage, membership_subscription, pricing, service_recovery, vacuums_amenities, safety, cleanliness, facility_condition, members_lounge, general_positive, general_negative.
 - Do NOT invent new themes for one-off issues. Fold rare complaints into the closest existing theme. Examples: sticker/adhesive residue → wash_quality; broken kiosk → equipment_reliability; well-stocked or low-supply → facility_condition; long wait → equipment_reliability; rude billing dispute → membership_subscription; soda machine, free drinks, members lounge, drink station → members_lounge. Only invent a new theme if the SAME novel topic appears in 3+ reviews in this batch AND no existing theme can plausibly hold it.
+- Only tag a theme the review actually talks about. Complaints about things outside the business (the drive or route to get there, traffic on public roads, weather) get no theme; mention them in negative_aspects only.
+- safety means physical danger or risk: injuries or near-misses, unsafe driving or traffic on the lot or in the tunnel, unsafe equipment or conditions (ice, broken glass, a gate hitting a car while someone is in it), or feeling unsafe because of people. It does NOT mean a family-friendly or welcoming atmosphere, the drive to the location, or general comfort. Playgrounds, kids' play areas and water blasters are vacuums_amenities, not safety, even when called "safe" or "fenced". A staff member guiding the car onto the conveyor is staff_helpfulness, not safety.
 - Tag ALL applicable themes per review, not just the dominant one. A review praising both friendliness AND helpfulness must get both tags. A review with three complaints gets three negative-leaning theme tags. Service recovery scenarios get service_recovery PLUS any other applicable themes.
 
 STAFF NAME RULES:
@@ -35,6 +41,7 @@ PER-REVIEW FIELDS:
 - sentiment: "positive" | "neutral" | "negative" | "mixed"
 - sentiment_score: number from -1.0 (most negative) to +1.0 (most positive)
 - themes: array of theme tags from the approved list (use ALL that apply)
+- theme_sentiments: object with one key per tag in themes, valued "positive" | "negative" | "mixed" | "neutral": what the customer says about THAT theme only, ignoring the rest of the review. Example: "Best vacuums, love the soda fountain, but it's a long drive" → {"vacuums_amenities": "positive", "members_lounge": "positive", "general_positive": "positive"}. Use mixed only when the review both praises and criticizes that same theme.
 - positive_aspects: short array of what was praised (or [])
 - negative_aspects: short array of complaints (or [])
 - staff_mentioned: array of normalized employee first names (or [])
@@ -84,6 +91,27 @@ def _validate_themes(review_analyses: list[dict]) -> None:
                 "Unapproved theme(s) %s in review %s — keeping but flagging",
                 bad, r.get("review_id")
             )
+
+
+THEME_SENTIMENTS = {"positive", "negative", "mixed", "neutral"}
+
+
+def _clean_theme_sentiments(review_analyses: list[dict]) -> None:
+    """Keep one valid theme_sentiments value per tagged theme (v3). A theme
+    with no or an unexpected value is left out of the dict (stored as NULL),
+    and a key for a theme that isn't tagged is dropped."""
+    for r in review_analyses:
+        raw = r.get("theme_sentiments")
+        raw = raw if isinstance(raw, dict) else {}
+        clean = {}
+        for t in r.get("themes", []):
+            v = str(raw.get(t) or "").strip().lower()
+            if v in THEME_SENTIMENTS:
+                clean[t] = v
+        if len(clean) < len(r.get("themes", [])):
+            logger.warning("Review %s: no sentiment for theme(s) %s",
+                           r.get("review_id"), [t for t in r.get("themes", []) if t not in clean])
+        r["theme_sentiments"] = clean
 
 
 def _sanity_check_sentiment(review_analyses: list[dict]) -> None:
@@ -213,6 +241,7 @@ def _analyze_with_retry(client: genai.Client, reviews: list[Review]) -> dict:
 
     review_analyses: list[dict] = parsed.get("reviews", [])
     _validate_themes(review_analyses)
+    _clean_theme_sentiments(review_analyses)
     _sanity_check_sentiment(review_analyses)
     _normalize_staff_names(review_analyses)
     parsed["summary"]["staff_to_recognize"] = _rebuild_staff_recognition(review_analyses)
@@ -229,7 +258,9 @@ def analyze_batch(reviews: list[Review], project: str, location: str) -> dict:
     """
     Send a batch of text reviews to Gemini and return the parsed JSON response
     with keys "reviews" and "summary". Automatically splits the batch and retries
-    if the response is truncated (JSON parse failure).
+    if the response is truncated (JSON parse failure). Reviews the model leaves
+    out of its answer (about 2 in 41 in testing, 2026-11-06) are sent once
+    more on their own.
     """
     client = genai.Client(
         vertexai=True,
@@ -237,7 +268,21 @@ def analyze_batch(reviews: list[Review], project: str, location: str) -> dict:
         location=location,
         credentials=vertex_credentials(),
     )
-    return _analyze_with_retry(client, reviews)
+    parsed = _analyze_with_retry(client, reviews)
+
+    key = lambda r: str(r.db_review_id) if r.db_review_id is not None else make_review_id(r)
+    returned = {str(a.get("review_id", "")).strip() for a in parsed.get("reviews", [])}
+    missing = [r for r in reviews if key(r) not in returned]
+    if missing:
+        logger.warning("Model left out %d of %d reviews -- asking again for those", len(missing), len(reviews))
+        again = _analyze_with_retry(client, missing)
+        got = again.get("reviews", [])
+        logger.info("Retry returned %d of %d", len(got), len(missing))
+        all_revs = parsed.get("reviews", []) + got
+        _normalize_staff_names(all_revs)
+        parsed["reviews"] = all_revs
+        parsed.setdefault("summary", {})["staff_to_recognize"] = _rebuild_staff_recognition(all_revs)
+    return parsed
 
 
 def generate_narrative(review_analyses: list[dict], project: str, location: str) -> dict:
